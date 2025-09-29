@@ -7,7 +7,7 @@ const itemSchema = new Schema({
   description: { type: String, trim: true },
   photoUrl: { type: String },
   contact: {
-    type: { type: String, enum: ['whatsapp','instagram','telegram','line','other'], required: true },
+    type: { type: String, enum: ['whatsapp','telegram'], required: true },
     value: { type: String, required: true, trim: true }
   },
   status: { type: String, enum: ['open','claimed'], default: 'open' },

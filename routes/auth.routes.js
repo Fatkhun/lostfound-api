@@ -22,7 +22,7 @@ router.post('/register',
   ],
   async (req, res) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.badRequest(errors.array());
+    if (!errors.isEmpty()) return res.badRequest('Lengkapi data terlebih dahulu');
 
     const { name, email, password } = req.body;
     const exists = await User.findOne({ email });
@@ -42,7 +42,7 @@ router.post('/login',
   ],
   async (req, res) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.badRequest(errors.array());
+    if (!errors.isEmpty()) return res.badRequest("Email atau password tidak valid");
 
     const { email, password } = req.body;
     const user = await User.findOne({ email });
