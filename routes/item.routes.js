@@ -41,6 +41,7 @@ router.get('/', async (req, res) => {
     const [items, total] = await Promise.all([
       Item.find(filter)
         .populate('category', 'name')
+        .populate('owner', 'name email')
         .sort({ createdAt: -1 })
         .skip(offset)
         .limit(limit)
