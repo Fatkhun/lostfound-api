@@ -63,13 +63,69 @@ router.get('/', async (req, res) => {
 });
 
 /* =========================
+   HISTORY MILIK USER (AUTH)
+   GET /api/items/history?q=&categoryId=&status=&type=&limit=&offset=
+========================= */
+router.get('/history', auth, async (req, res) => {
+  try {
+    const { q, categoryId, status, type } = req.query;
+
+    // pagination
+    let { offset = '0', limit = '20' } = req.query;
+    offset = parseInt(offset, 10); if (Number.isNaN(offset) || offset < 0) offset = 0;
+    limit  = parseInt(limit, 10);  if (Number.isNaN(limit)  || limit <= 0) limit = 20;
+    if (limit > 100) limit = 100;
+
+    // filter (dibatasi ke owner = user yang login)
+    const filter = { owner: req.user.id };
+    if (categoryId) filter.category = categoryId;
+    if (status && ['open','claimed'].includes(String(status).toLowerCase())) {
+      filter.status = String(status).toLowerCase();
+    }
+    if (type && ['lost','found'].includes(String(type).toLowerCase())) {
+      filter.type = String(type).toLowerCase();
+    }
+    if (q) {
+      filter.$or = [
+        { name:        { $regex: q, $options: 'i' } },
+        { description: { $regex: q, $options: 'i' } },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      Item.find(filter)
+        .populate('category', 'name')
+        .populate('owner', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+      Item.countDocuments(filter),
+    ]);
+
+    return res.ok({
+      items,
+      pagination: {
+        offset,
+        limit,
+        total,
+        hasMore: offset + items.length < total,
+      }
+    });
+  } catch (e) {
+    return res.error(e.message);
+  }
+});
+
+
+/* =========================
    DETAIL
    GET /api/items/:id
 ========================= */
 router.get('/:id', async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.badRequest('INVALID_ID');
-    const doc = await Item.findById(req.params.id).populate('category', 'name');
+    const doc = await Item.findById(req.params.id).populate('category', 'name').populate('owner', 'name email');
     if (!doc) return res.notFound();
     return res.ok(doc);
   } catch (e) {
