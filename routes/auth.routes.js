@@ -1,16 +1,17 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const supabase = require('../config/supabaseClient'); // Import the supabase client
 const auth = require('../middlewares/auth');
 
 const router = express.Router();
 
+// Helper function to sign JWT token
 const signToken = (user) =>
   jwt.sign(
     { email: user.email, role: user.role || 'user' },
     process.env.JWT_SECRET,
-    { subject: user._id.toString(), expiresIn: process.env.JWT_EXPIRES || '7d' }
+    { subject: user.id.toString(), expiresIn: process.env.JWT_EXPIRES || '7d' }
   );
 
 // Register
@@ -25,12 +26,27 @@ router.post('/register',
     if (!errors.isEmpty()) return res.badRequest('Lengkapi data terlebih dahulu');
 
     const { name, email, password } = req.body;
-    const exists = await User.findOne({ email });
-    if (exists) return res.conflict('Email sudah terdaftar');
 
-    const user = await User.create({ name, email, password });
-    const token = signToken(user);
-    return res.created({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+    // Check if email exists in Supabase
+    const { data: existingUser, error } = await supabase
+      .from('users')
+      .select('email')
+      .eq('email', email)
+      .single();
+
+    //console.log("Existing User:", existingUser)
+    //console.log("Error:", error);
+    
+    if (existingUser) {
+        return res.conflict('Email sudah terdaftar');
+    } else {
+        // Insert new user into Supabase
+        const createUser = await supabase
+          .from('users')
+          .insert({ name, email, password });
+        //console.log("User:", createUser);
+        return res.created({},"Register berhasil");
+    }
   }
 );
 
@@ -45,21 +61,33 @@ router.post('/login',
     if (!errors.isEmpty()) return res.badRequest("Email atau password tidak valid");
 
     const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.badRequest('Email atau password salah');
+    
+    // Find user from Supabase
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, role, password')
+      .eq('email', email)
+      .single();
 
-    const ok = await user.comparePassword(password);
-    if (!ok) return res.badRequest('Email atau password salah');
+    if (error || !user) return res.badRequest('Email atau password salah');
+
+    // Check password (you should hash the password for production)
+    if (user.password !== password) return res.badRequest('Email atau password salah');
 
     const token = signToken(user);
-    return res.ok({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+    return res.ok({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   }
 );
 
-// Me
+// Me (Get logged-in user info)
 router.get('/me', auth, async (req, res) => {
-  const user = await User.findById(req.user.id).select('-password');
-  if (!user) return res.notFound();
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, name, email, role')
+    .eq('id', req.user.id)
+    .single();
+
+  if (error || !user) return res.notFound();
   return res.ok(user);
 });
 

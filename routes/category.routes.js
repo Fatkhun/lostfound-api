@@ -1,47 +1,75 @@
 const express = require('express');
-const Category = require('../models/Category');
+const supabase = require('../config/supabaseClient');
 const auth = require('../middlewares/auth');
 
 const router = express.Router();
 
-// Create
+// Create category
 router.post('/', auth, async (req, res) => {
   try {
-    const doc = await Category.create({ name: req.body.name });
-    return res.created(doc);
+    const { name } = req.body;
+    
+    // Insert category into Supabase
+    const { data, error } = await supabase
+      .from('categories')
+      .insert({ name });
+
+    if (error) return res.badRequest(error.message);
+    return res.created({},"Berhasil buat kategori");
   } catch (e) {
     return res.badRequest(e.message);
   }
 });
 
-// List
+// List categories
 router.get('/', async (_req, res) => {
-  const list = await Category.find().sort({ name: 1 });
-  return res.ok(list);
+  const { data: categories, error } = await supabase
+    .from('categories')
+    .select('*')
+    .order('id', { ascending: true });
+
+  if (error) return res.error(error.message);
+  return res.ok(categories);
 });
 
-// Detail
+// Category details
 router.get('/:id', async (req, res) => {
-  const doc = await Category.findById(req.params.id);
-  if (!doc) return res.notFound();
-  return res.ok(doc);
+  const { data: category, error } = await supabase
+    .from('categories')
+    .select('*')
+    .eq('id', req.params.id)
+    .single();
+
+  if (error || !category) return res.notFound();
+  return res.ok(category);
 });
 
-// Update
+// Update category
 router.patch('/:id', auth, async (req, res) => {
   try {
-    const doc = await Category.findByIdAndUpdate(req.params.id, { name: req.body.name }, { new: true });
-    if (!doc) return res.notFound();
-    return res.ok(doc, 'UPDATED');
+    const { name } = req.body;
+    
+    const { data: updatedCategory, error } = await supabase
+      .from('categories')
+      .update({ name })
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !updatedCategory) return res.notFound();
+    return res.ok(updatedCategory, 'UPDATED');
   } catch (e) {
     return res.badRequest(e.message);
   }
 });
 
-// Delete
+// Delete category
 router.delete('/:id', auth, async (req, res) => {
-  const out = await Category.findByIdAndDelete(req.params.id);
-  if (!out) return res.notFound();
+  const { data: deleted, error } = await supabase
+    .from('categories')
+    .delete()
+    .eq('id', req.params.id);
+
+  if (error || !deleted) return res.notFound();
   return res.ok({ message: 'Deleted' }, 'DELETED');
 });
 

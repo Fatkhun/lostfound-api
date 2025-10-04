@@ -1,9 +1,7 @@
-const mongoose = require('mongoose');
+// db.js
+import postgres from 'postgres'
 
-async function connectDB(uri) {
-  mongoose.set('strictQuery', true);
-  await mongoose.connect(uri);
-  console.log('✅ MongoDB connected');
-}
+const connectionString = process.env.DATABASE_URL
+const sql = postgres(connectionString)
 
-module.exports = { connectDB };
+export default sql

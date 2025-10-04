@@ -16,5 +16,5 @@ function fileFilter(_req, file, cb) {
   ok ? cb(null, true) : cb(new Error('Only jpg/jpeg/png/webp allowed'));
 }
 
-const upload = multer({ storage, fileFilter, limits: { fileSize: 3 * 1024 * 1024 } }); // 3MB
+const upload = multer({ storage: multer.memoryStorage(), fileFilter, limits: { fileSize: 3 * 1024 * 1024 } }); // 3MB
 module.exports = { upload };

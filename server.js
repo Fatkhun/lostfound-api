@@ -4,7 +4,6 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 
-const { connectDB } = require('./config/db');
 const authRoutes = require('./routes/auth.routes');
 const categoryRoutes = require('./routes/category.routes');
 const itemRoutes = require('./routes/item.routes');
@@ -47,6 +46,4 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 8080;
-connectDB(process.env.MONGODB_URI)
-  .then(() => app.listen(PORT, () => console.log(`🚀 API ready on http://localhost:${PORT}`)))
-  .catch((e) => { console.error('Mongo connect error', e); process.exit(1); });
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`))

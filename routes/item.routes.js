@@ -1,61 +1,118 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const Item = require('../models/Item');
-const Category = require('../models/Category');
+const supabase = require('../config/supabaseClient'); // Import Supabase client
 const { upload } = require('../middlewares/upload');
 const auth = require('../middlewares/auth');
+const {decode} = require('base64-arraybuffer');
+const sharp = require('sharp');
 
 const router = express.Router();
 
 const ALLOWED_TYPES = ['lost', 'found'];
 const ALLOWED_CONTACTS = ['whatsapp', 'instagram', 'telegram', 'line', 'other'];
 
-/* =========================
-   LIST + FILTER + PAGINATION
-   GET /api/items?q=&categoryId=&status=&type=&limit=&offset=
-========================= */
+// Function to handle image compression
+async function compressImage(file) {
+  try {
+    // Read the image buffer from file (use sharp to process the image)
+    const compressedBuffer = await sharp(file.buffer)
+      .resize(800) // Resize to a max width of 800px (you can change this as needed)
+      .jpeg({ quality: 50 }) // Compress and set quality to 70%
+      .toBuffer(); // Convert it back to buffer
+
+    // Convert the compressed buffer to base64 (optional if needed for Supabase upload)
+    const fileBase64 = compressedBuffer.toString("base64");
+
+    return fileBase64; // Return the compressed image buffer (base64 or direct buffer)
+  } catch (err) {
+    console.error("Error compressing image:", err);
+    throw err; // Handle error properly
+  }
+}
+
+
+// List items with filter, pagination, and offset
 router.get('/', async (req, res) => {
   try {
-    const { q, categoryId, status, type } = req.query;
+    const { q, category_id, status, type, offset = 0, limit = 20 } = req.query;
 
-    // pagination
-    let { offset = '0', limit = '20' } = req.query;
-    offset = parseInt(offset, 10); if (Number.isNaN(offset) || offset < 0) offset = 0;
-    limit  = parseInt(limit, 10);  if (Number.isNaN(limit)  || limit <= 0) limit = 20;
-    if (limit > 100) limit = 100;
+    // Prepare filters
+    let filterCat = {};
+    let filterCatAll = {};
+    let filterStatus = {};  // Changed const to let
+    let filterType = {};    // Changed const to let
 
-    // filter
-    const filter = {};
-    if (categoryId) filter.category = categoryId;
-    if (status)     filter.status   = status;
-    if (type && ALLOWED_TYPES.includes(String(type).toLowerCase())) {
-      filter.type = String(type).toLowerCase();
+    const { data: itemCat, error } = await supabase
+      .from('categories')
+      .select('id');
+
+    if (error) {
+        console.error("Error fetching categories:", error.message);
+    } else {
+
+        // Build the filter string
+        let filterAll = itemCat.map(value => `category_id.eq.${value.id}`).join(',');
+
+        // If you want to remove the trailing comma, you can use slice (although join doesn't leave one in this case)
+        filterCatAll = filterAll;
     }
-    if (q) {
-      filter.$or = [
-        { name:        { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
-      ];
+
+    console.log("filter all ", filterCatAll)
+
+    if (category_id !== '0') {
+        filterCat = `category_id.eq.${category_id}`;
+    } else {
+        filterCat = filterCatAll
+    }
+    
+    // Handle status filter
+    if (status !== '') {
+      filterStatus = `status.eq.${status}`;
+    } else {
+      filterStatus = 'status.eq.open,status.eq.claimed'; // If status is empty, fetch both 'open' and 'claimed'
     }
 
-    const [items, total] = await Promise.all([
-      Item.find(filter)
-        .populate('category', 'name')
-        .populate('owner', 'name email')
-        .sort({ createdAt: -1 })
-        .skip(offset)
-        .limit(limit)
-        .lean(),
-      Item.countDocuments(filter),
-    ]);
+    // Handle type filter
+    if (type !== '') {
+      filterType = `type.eq.${type}`;
+    } else {
+      filterType = 'type.eq.lost,type.eq.found'; // If type is empty, fetch both 'lost' and 'found'
+    }
+
+    console.log("val1 ", filterStatus);
+    console.log("val2 ", filterType);
+
+    // Fetch filtered items from Supabase
+    const { data: items, error: itemsError } = await supabase
+      .from('items')
+      .select('*, owner_id:users(id, name, email), category_id:categories(id, name)')
+      .ilike('name', `%${q}%`) 
+      .or(filterCat)
+      .or(filterStatus) // Handle multiple status filter
+      .or(filterType)   // Handle multiple type filter
+      .range(offset, offset + limit - 1)
+      .order('id', { ascending: false });  // Pagination with offset and limit
+
+    console.log("err ", itemsError);
+    if (itemsError) return res.error(itemsError.message);
+
+    // Count total items based on filters
+    const { data: totalCount, error: countError } = await supabase
+      .from('items')
+      .select('id', { count: 'exact' })
+      .ilike('name', `%${q}%`) 
+      .or(filterCat)
+      .or(filterStatus)  // Same for status
+      .or(filterType)
+      .order('id', { ascending: false });   // Same for type
+
+    if (countError) return res.error(countError.message);
 
     return res.ok({
       items,
       pagination: {
         offset,
         limit,
-        total,
-        hasMore: offset + items.length < total,
+        total: totalCount.length,
       }
     });
   } catch (e) {
@@ -63,54 +120,92 @@ router.get('/', async (req, res) => {
   }
 });
 
-/* =========================
-   HISTORY MILIK USER (AUTH)
-   GET /api/items/history?q=&categoryId=&status=&type=&limit=&offset=
-========================= */
+
+// History - Items owned by the logged-in user
 router.get('/history', auth, async (req, res) => {
   try {
-    const { q, categoryId, status, type } = req.query;
+    const { q, user_id, category_id = 0, status = '', type = '', offset = 0, limit = 20 } = req.query;
 
-    // pagination
-    let { offset = '0', limit = '20' } = req.query;
-    offset = parseInt(offset, 10); if (Number.isNaN(offset) || offset < 0) offset = 0;
-    limit  = parseInt(limit, 10);  if (Number.isNaN(limit)  || limit <= 0) limit = 20;
-    if (limit > 100) limit = 100;
+    // Prepare filters
+    let filterCat = {};
+    let filterCatAll = {};
+    let filterStatus = {};  // Changed const to let
+    let filterType = {};    // Changed const to let
 
-    // filter (dibatasi ke owner = user yang login)
-    const filter = { owner: req.user.id };
-    if (categoryId) filter.category = categoryId;
-    if (status && ['open','claimed'].includes(String(status).toLowerCase())) {
-      filter.status = String(status).toLowerCase();
-    }
-    if (type && ['lost','found'].includes(String(type).toLowerCase())) {
-      filter.type = String(type).toLowerCase();
-    }
-    if (q) {
-      filter.$or = [
-        { name:        { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
-      ];
+    const { data: itemCat, error } = await supabase
+      .from('categories')
+      .select('id');
+
+    if (error) {
+        console.error("Error fetching categories:", error.message);
+    } else {
+
+        // Build the filter string
+        let filterAll = itemCat.map(value => `category_id.eq.${value.id}`).join(',');
+
+        // If you want to remove the trailing comma, you can use slice (although join doesn't leave one in this case)
+        filterCatAll = filterAll;
     }
 
-    const [items, total] = await Promise.all([
-      Item.find(filter)
-        .populate('category', 'name')
-        .populate('owner', 'name email')
-        .sort({ createdAt: -1 })
-        .skip(offset)
-        .limit(limit)
-        .lean(),
-      Item.countDocuments(filter),
-    ]);
+    console.log("filter all ", filterCatAll)
+
+    if (category_id !== '0') {
+        filterCat = `category_id.eq.${category_id}`;
+    } else {
+        filterCat = filterCatAll
+    }
+    
+    // Handle status filter
+    if (status !== '') {
+      filterStatus = `status.eq.${status}`;
+    } else {
+      filterStatus = 'status.eq.open,status.eq.claimed'; // If status is empty, fetch both 'open' and 'claimed'
+    }
+
+    // Handle type filter
+    if (type !== '') {
+      filterType = `type.eq.${type}`;
+    } else {
+      filterType = 'type.eq.lost,type.eq.found'; // If type is empty, fetch both 'lost' and 'found'
+    }
+
+    console.log("val1 ", filterStatus);
+    console.log("val2 ", filterType);
+
+    // Fetch filtered items from Supabase
+    const { data: items, error: itemsError } = await supabase
+      .from('items')
+      .select('*, owner_id:users(id, name, email), category_id:categories(id, name)')
+      .ilike('name', `%${q}%`)
+      .eq("owner_id", user_id) 
+      .or(filterCat)
+      .or(filterStatus) // Handle multiple status filter
+      .or(filterType)   // Handle multiple type filter
+      .range(offset, offset + limit - 1)
+      .order('id', { ascending: false });  // Pagination with offset and limit
+
+    console.log("err ", itemsError);
+    if (itemsError) return res.error(itemsError.message);
+
+    // Count total items based on filters
+    const { data: totalCount, error: countError } = await supabase
+      .from('items')
+      .select('id', { count: 'exact' })
+      .ilike('name', `%${q}%`) 
+      .eq("owner_id", user_id) 
+      .or(filterCat)
+      .or(filterStatus)  // Same for status
+      .or(filterType)
+      .order('id', { ascending: false });   // Same for type
+
+    if (countError) return res.error(countError.message);
 
     return res.ok({
       items,
       pagination: {
         offset,
         limit,
-        total,
-        hasMore: offset + items.length < total,
+        total: totalCount.length,
       }
     });
   } catch (e) {
@@ -118,125 +213,205 @@ router.get('/history', auth, async (req, res) => {
   }
 });
 
-
-/* =========================
-   DETAIL
-   GET /api/items/:id
-========================= */
+// Item Details
 router.get('/:id', async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.badRequest('INVALID_ID');
-    const doc = await Item.findById(req.params.id).populate('category', 'name').populate('owner', 'name email');
-    if (!doc) return res.notFound();
-    return res.ok(doc);
+    const { data: item, error } = await supabase
+      .from('items')
+      .select('*, owner_id:users(id, name, email), category_id:categories(id, name)')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !item) return res.notFound();
+    return res.ok(item);
   } catch (e) {
     return res.error(e.message);
   }
 });
 
-/* =========================
-   CREATE (MULTIPART)
-   POST /api/items
-========================= */
+// Create Item
 router.post('/', auth, upload.single('photo'), async (req, res) => {
   try {
-    const { categoryId, type, name, description, contactType, contactValue } = req.body;
+    const { id, type, name, description, contact_type, contact_value, user_id } = req.body;
 
-    if (!categoryId || !mongoose.isValidObjectId(categoryId))
-      return res.badRequest('INVALID_CATEGORY_ID');
-    if (!name) return res.badRequest('NAME_REQUIRED');
-    if (!contactType || !ALLOWED_CONTACTS.includes(String(contactType).toLowerCase()))
-      return res.badRequest('CONTACT_TYPE_INVALID');
-    if (!contactValue) return res.badRequest('CONTACT_VALUE_REQUIRED');
+    if (!id || !type || !name || !contact_type || !contact_value || !user_id)
+      return res.badRequest('Missing required fields');
 
-    const cat = await Category.findById(categoryId);
-    if (!cat) return res.badRequest('Category not found');
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', user_id)
+      .single();
 
-    const kind = (type || 'lost').toLowerCase();
-    if (!ALLOWED_TYPES.includes(kind)) return res.badRequest('type must be "lost" or "found"');
+    if (userError || !user) return res.badRequest('User not found');
 
-    const base = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const photoUrl = req.file ? `${base}/uploads/${req.file.filename}` : undefined;
+    const { data: category, error: categoryError } = await supabase
+      .from('categories')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const doc = await Item.create({
-      category: categoryId,
-      type: kind,
-      name,
-      description,
-      photoUrl,
-      contact: { type: contactType, value: contactValue },
-      owner: req.user.id
-    });
+    if (categoryError || !category) return res.badRequest('Category not found');
 
-    return res.created(doc);
+    if (!ALLOWED_TYPES.includes(type)) return res.badRequest('Type must be "lost" or "found"');
+
+    const file = req.file;
+
+    if (file) {
+        console.log("img1 ", file);
+
+        // decode file buffer to base64
+        const fileBase64 = await compressImage(file);
+
+        //console.log("img2 ", fileBase64);
+
+        // upload the file to supabase
+        const { data, error } = await supabase.storage
+          .from("etemu")
+          .upload(file.originalname, decode(fileBase64), {
+            contentType: "image/png",
+          });
+
+        if (error) {
+          throw error;
+        }
+
+        // get public url of the uploaded file
+        const { data: image } = supabase.storage
+          .from("etemu")
+          .getPublicUrl(data.path);
+
+        console.log(image.publicUrl);
+
+        const photoUrl = file ? image.publicUrl : "";
+
+        const { error: itemError } = await supabase
+          .from('items')
+          .insert({
+              category_id: category.id,
+              type: type,
+              name: name,
+              description: description,
+              photo_url: photoUrl,
+              contact_type: contact_type,
+              contact_value: contact_value,
+              status: "open",
+              owner_id: user.id
+            })
+          .single();
+
+        if (itemError) return res.error(itemError.message);
+        return res.created({}, "Posting berhasil");
+    }
+
+    const { error: itemError } = await supabase
+      .from('items')
+      .insert({
+          category_id: category.id,
+          type: type,
+          name: name,
+          description: description,
+          photo_url: "",
+          contact_type: contact_type,
+          contact_value: contact_value,
+          status: "open",
+          owner_id: user.id
+        })
+      .single();
+
+    if (itemError) return res.error(itemError.message);
+    return res.created({}, "Posting berhasil");
   } catch (e) {
     return res.badRequest(e.message);
   }
 });
 
-/* =========================
-   UPDATE (MULTIPART OPTIONAL)
-   PATCH /api/items/:id
-========================= */
+// Update Item
 router.patch('/:id', auth, upload.single('photo'), async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.badRequest('INVALID_ID');
+    const { id } = req.params;
+    const { name, description, category_id, contact_type, contact_value, status, type } = req.body;
 
-    const current = await Item.findById(req.params.id);
-    if (!current) return res.notFound();
-    if (current.owner && current.owner.toString() !== req.user.id && req.user.role !== 'admin') {
-      return res.forbidden();
-    }
+    // Fetch the existing item by its ID
+    const { data: item, error: fetchError } = await supabase
+      .from('items')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const update = {};
-    const { name, description, categoryId, contactType, contactValue, status, type } = req.body;
+    if (fetchError || !item) return res.notFound(); // Return 404 if item not found
 
-    if (name) update.name = name;
-    if (description) update.description = description;
-    if (categoryId) {
-      if (!mongoose.isValidObjectId(categoryId)) return res.badRequest('INVALID_CATEGORY_ID');
-      update.category = categoryId;
-    }
-    if (contactType || contactValue) {
-      if (contactType && !ALLOWED_CONTACTS.includes(String(contactType).toLowerCase()))
-        return res.badRequest('CONTACT_TYPE_INVALID');
-      update.contact = {
-        type:  contactType || current.contact.type,
-        value: contactValue || current.contact.value
-      };
-    }
-    if (status) update.status = status;
-    if (type) {
-      const kind = String(type).toLowerCase();
-      if (!ALLOWED_TYPES.includes(kind)) return res.badRequest('type must be "lost" or "found"');
-      update.type = kind;
-    }
+    const updatedFields = {};
+
+    // Update fields based on the provided request body
+    if (name !== '') updatedFields.name = name;
+    if (description !== '') updatedFields.description = description;
+    if (category_id !== '0') updatedFields.category_id = category_id;
+    if (contact_type !== '') updatedFields.contact_type = contact_type;
+    if (contact_value != '') updatedFields.contact_value = contact_value;
+    if (status !== '') updatedFields.status = status;
+    if (type !== '') updatedFields.type = type;
+
+    // Handle file upload if a new photo is provided
     if (req.file) {
-      const base = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-      update.photoUrl = `${base}/uploads/${req.file.filename}`;
+      // Convert the file to base64 to upload to Supabase storage
+      const fileBase64 = decode(req.file.buffer.toString("base64"));
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from("etemu")  // Adjust to your Supabase bucket name
+        .upload(req.file.originalname, fileBase64, {
+          contentType: req.file.mimetype
+        });
+
+      if (uploadError) return res.error(uploadError.message);
+
+      // Fetch the public URL of the uploaded file
+      const { data: imageData } = supabase.storage
+        .from("etemu")
+        .getPublicUrl(uploadData.path);
+
+      // Add the URL of the uploaded image to the updated fields
+      updatedFields.photo_url = imageData.publicUrl;
     }
 
-    const doc = await Item.findByIdAndUpdate(req.params.id, update, { new: true });
-    return res.ok(doc, 'UPDATED');
+    // Update the item in the database
+    const { data: updatedItem, error: updateError } = await supabase
+      .from('items')
+      .update(updatedFields)
+      .eq('id', id)
+      .single();
+
+    if (updateError) return res.error(updateError.message); // Handle errors during the update process
+
+    // Return the updated item
+    return res.ok({}, 'Berhasil update');
   } catch (e) {
-    return res.badRequest(e.message);
+    // Handle any errors that occur during the process
+    return res.error(e.message);
   }
 });
 
-/* =========================
-   DELETE
-   DELETE /api/items/:id
-========================= */
+
+// Delete Item
 router.delete('/:id', auth, async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.badRequest('INVALID_ID');
-    const current = await Item.findById(req.params.id);
-    if (!current) return res.notFound();
-    if (current.owner && current.owner.toString() !== req.user.id && req.user.role !== 'admin') {
-      return res.forbidden();
-    }
-    await current.deleteOne();
-    return res.ok({ id: req.params.id }, 'DELETED');
+    const { id } = req.params;
+
+    const { data: item, error } = await supabase
+      .from('items')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !item) return res.notFound();
+
+    const { error: deleteError } = await supabase
+      .from('items')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) return res.error(deleteError.message);
+    return res.ok({ id }, 'DELETED');
   } catch (e) {
     return res.error(e.message);
   }
